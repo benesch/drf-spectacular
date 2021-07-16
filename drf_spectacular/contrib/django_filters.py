@@ -1,6 +1,6 @@
 from django.db import models
 
-from drf_spectacular.drainage import warn
+from drf_spectacular.drainage import add_trace_message, warn
 from drf_spectacular.extensions import OpenApiFilterExtension
 from drf_spectacular.plumbing import (
     build_array_type, build_basic_type, build_parameter_type, follow_field_source, get_type_hints,
@@ -9,23 +9,39 @@ from drf_spectacular.plumbing import (
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter
 
-# Underspecified filter fields for which heuristics are performed. Serves
-# as an explicit list of all remaining/partially-handled filter fields.
-# ----------------------------------------------------------------------------
-# 'AllValuesFilter',  # for no DB hit skip choices
-# 'AllValuesMultipleFilter',  # for no DB hit skip choices, multi handled
-# 'ChoiceFilter',  # enum handled
-# 'DateRangeFilter',  # TODO not sure how this one works exactly
-# 'LookupChoiceFilter',  # TODO not sure how this one works exactly
-# 'ModelChoiceFilter',  # enum handled
-# 'ModelMultipleChoiceFilter',  # enum,multi handled
-# 'MultipleChoiceFilter',  # enum,multi handled
-# 'RangeFilter',  # min/max handled
-# 'TypedChoiceFilter',  # enum handled
-# 'TypedMultipleChoiceFilter',  # enum,multi handled
-
 
 class DjangoFilterExtension(OpenApiFilterExtension):
+    """
+    Extensions that specifically deals with ``django-filter`` fields. The introspection
+    attempts to estimate the underlying model field types to generate filter types.
+
+    However, there are under-specified filter fields for which heuristics need to be performed.
+    This serves as an explicit list of all partially-handled filter fields:
+
+    - ``AllValuesFilter``: skip choices to prevent DB query
+    - ``AllValuesMultipleFilter``: skip choices to prevent DB query, multi handled though
+    - ``ChoiceFilter``: enum handled, type under-specified
+    - ``DateRangeFilter``: N/A
+    - ``LookupChoiceFilter``: N/A
+    - ``ModelChoiceFilter``: enum handled
+    - ``ModelMultipleChoiceFilter``: enum, multi handled
+    - ``MultipleChoiceFilter``: enum, multi handled
+    - ``RangeFilter``: min/max handled, type under-specified
+    - ``TypedChoiceFilter``: enum handled
+    - ``TypedMultipleChoiceFilter``: enum, multi handled
+
+    In case of warnings or incorrect filter types, you can manually override the underlying
+    field type with an added ``schema`` parameter.
+
+    .. code-block::
+
+        class SomeFilter(FilterSet):
+            some_field = django_filters.RangeFilter(
+                field_name='some_manually_annotated_field_in_qs',
+                schema=OpenApiTypes.NUMBER,  # alternatively basic types like float
+            )
+
+    """
     target_class = 'django_filters.rest_framework.DjangoFilterBackend'
 
     def get_schema_operation_parameters(self, auto_schema, *args, **kwargs):
@@ -38,10 +54,11 @@ class DjangoFilterExtension(OpenApiFilterExtension):
             return []
 
         result = []
-        for field_name, filter_field in filterset_class.base_filters.items():
-            result += self.resolve_filter_field(
-                auto_schema, model, filterset_class, field_name, filter_field
-            )
+        with add_trace_message(filterset_class.__name__):
+            for field_name, filter_field in filterset_class.base_filters.items():
+                result += self.resolve_filter_field(
+                    auto_schema, model, filterset_class, field_name, filter_field
+                )
         return result
 
     def resolve_filter_field(self, auto_schema, model, filterset_class, field_name, filter_field):
@@ -62,7 +79,13 @@ class DjangoFilterExtension(OpenApiFilterExtension):
             filters.IsoDateTimeFromToRangeFilter: OpenApiTypes.DATETIME,
             filters.DateTimeFromToRangeFilter: OpenApiTypes.DATETIME,
         }
-        if isinstance(filter_field, tuple(unambiguous_mapping)):
+        if 'schema' in filter_field.extra:
+            annotation = filter_field.extra['schema']
+            if is_basic_type(annotation):
+                schema = build_basic_type(annotation)
+            else:
+                schema = annotation
+        elif isinstance(filter_field, tuple(unambiguous_mapping)):
             for cls in filter_field.__class__.__mro__:
                 if cls in unambiguous_mapping:
                     schema = build_basic_type(unambiguous_mapping[cls])

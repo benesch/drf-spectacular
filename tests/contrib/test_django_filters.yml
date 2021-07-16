@@ -139,6 +139,14 @@ paths:
           type: number
           format: float
       - in: query
+        name: price_range_vat_max
+        schema:
+          type: number
+      - in: query
+        name: price_range_vat_min
+        schema:
+          type: number
+      - in: query
         name: sub
         schema:
           type: integer
